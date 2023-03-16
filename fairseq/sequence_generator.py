@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import os.path
 import sys
 from typing import Dict, List, Optional
 
@@ -774,6 +775,16 @@ class EnsembleModel(nn.Module):
         ):
             self.has_incremental = True
 
+        self.save_onnx = True
+        self.onnx_engine = True
+
+        self.FILE_PATH = os.path.join(os.path.expanduser("~/tmp"), "fairseq-models-onnx")
+        if not os.path.exists(self.FILE_PATH):
+            os.makedirs(self.FILE_PATH)
+
+        print("EnsembleModel init")
+        print("self.FILE_PATH: ", self.FILE_PATH)
+
     def forward(self):
         pass
 
@@ -802,9 +813,45 @@ class EnsembleModel(nn.Module):
 
     @torch.jit.export
     def forward_encoder(self, net_input: Dict[str, Tensor]):
+        if False and self.save_onnx:
+            self.encoder_export_onnx(net_input)
         if not self.has_encoder():
             return None
         return [model.encoder.forward_torchscript(net_input) for model in self.models]
+
+    def decoder_export_onnx(self, model, tokens, encoder_out, incremental_states):
+        print("decoder_export_onnx")
+        torch.onnx.export(model.decoder,
+            (tokens,
+                encoder_out,
+                incremental_states),
+            os.path.join(self.FILE_PATH, "decoder.onnx"),
+            # input_names = ["prev_output_tokens", "onnx::MatMul_1"],
+            # dynamic_axes={'prev_output_tokens' : {1 : 'batch_size'}},
+            opset_version=14,
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+            verbose=True
+            )
+        print("decoder_export_onnx done")
+
+    def encoder_export_onnx(self,net_input):
+        print("encoder_export_onnx")
+        model = self.models[0]
+        model.prepare_for_onnx_export_()
+        model.eval()
+        torch.onnx.export(model.encoder,
+                    net_input,
+                          os.path.join(self.FILE_PATH, "encoder.onnx"),
+                    opset_version=14,
+                    # input_names=["onnx::Transpose_0","src_lengths"],
+                    # dynamic_axes={'onnx::Transpose_0' : {0:"batch_size",
+                    #                                      1:"feature_len",
+                    #                                      2:"tmp_len"},
+                    #               "src_lengths":{0:"src_lengths"}},
+                    operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+                    verbose=True
+        )
+        print("encoder_export_onnx done")
 
     @torch.jit.export
     def forward_decoder(
@@ -820,6 +867,8 @@ class EnsembleModel(nn.Module):
         for i, model in enumerate(self.models):
             if self.has_encoder():
                 encoder_out = encoder_outs[i]
+            # if self.save_onnx:
+            #     self.decoder_export_onnx(model, tokens, encoder_out, incremental_states[i])
             # decode each model
             if self.has_incremental_states():
                 decoder_out = model.decoder.forward(
@@ -827,6 +876,8 @@ class EnsembleModel(nn.Module):
                     encoder_out=encoder_out,
                     incremental_state=incremental_states[i],
                 )
+                if self.save_onnx:
+                    self.decoder_export_onnx(model, tokens, encoder_out, incremental_states[i])
             else:
                 if hasattr(model, "decoder"):
                     decoder_out = model.decoder.forward(tokens, encoder_out=encoder_out)
