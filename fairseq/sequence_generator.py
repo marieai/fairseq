@@ -775,7 +775,7 @@ class EnsembleModel(nn.Module):
         ):
             self.has_incremental = True
 
-        self.save_onnx = True
+        self.save_onnx = False
         self.onnx_engine = True
 
         self.FILE_PATH = os.path.join(os.path.expanduser("~/tmp"), "fairseq-models-onnx")
@@ -813,7 +813,7 @@ class EnsembleModel(nn.Module):
 
     @torch.jit.export
     def forward_encoder(self, net_input: Dict[str, Tensor]):
-        if False and self.save_onnx:
+        if self.save_onnx:
             self.encoder_export_onnx(net_input)
         if not self.has_encoder():
             return None
@@ -834,22 +834,33 @@ class EnsembleModel(nn.Module):
             )
         print("decoder_export_onnx done")
 
-    def encoder_export_onnx(self,net_input):
+    def encoder_export_onnx(self, net_input):
         print("encoder_export_onnx")
         model = self.models[0]
         model.prepare_for_onnx_export_()
         model.eval()
-        torch.onnx.export(model.encoder,
-                    net_input,
-                          os.path.join(self.FILE_PATH, "encoder.onnx"),
-                    opset_version=14,
-                    # input_names=["onnx::Transpose_0","src_lengths"],
-                    # dynamic_axes={'onnx::Transpose_0' : {0:"batch_size",
-                    #                                      1:"feature_len",
-                    #                                      2:"tmp_len"},
-                    #               "src_lengths":{0:"src_lengths"}},
-                    operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
-                    verbose=True
+
+        compiled = torch.compile(model.encoder)
+        # decorated = torch.jit.script(model.encoder, example_inputs=net_input["imgs"])
+        # traced_cell = torch.jit.trace(model.encoder, example_inputs=net_input["imgs"])
+        print(compiled)
+
+        torch.onnx.export(compiled,
+            net_input,
+            os.path.join(self.FILE_PATH, "encoder.onnx"),
+            opset_version=14,
+            export_params=True, # store the trained parameter weights inside the model file
+            do_constant_folding=True,  # whether to execute constant folding for optimization
+            input_names=["imgs"],
+            # dynamic_axes={'imgs' : {0 : 'batch_size'}},
+
+            # input_names=["onnx::Transpose_0","src_lengths"],
+            # dynamic_axes={'onnx::Transpose_0' : {0:"batch_size",
+            #                                      1:"feature_len",
+            #                                      2:"tmp_len"},
+            #               "src_lengths":{0:"src_lengths"}},
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+            verbose=True
         )
         print("encoder_export_onnx done")
 
@@ -876,7 +887,7 @@ class EnsembleModel(nn.Module):
                     encoder_out=encoder_out,
                     incremental_state=incremental_states[i],
                 )
-                if self.save_onnx:
+                if False and self.save_onnx:
                     self.decoder_export_onnx(model, tokens, encoder_out, incremental_states[i])
             else:
                 if hasattr(model, "decoder"):
