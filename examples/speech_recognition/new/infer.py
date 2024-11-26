@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import sys
+import re
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -101,6 +102,29 @@ class InferenceProcessor:
         self.task = tasks.setup_task(cfg.task)
 
         models, saved_cfg = self.load_model_ensemble()
+
+        ### LOAD ADAPTER ####
+        ckpt_obj = checkpoint_utils.load_checkpoint_to_cpu(self.cfg.common_eval.path)
+        if "adapter" in ckpt_obj:
+            target_lang = self.cfg.dataset.gen_subset.split(":")[0]
+            assert target_lang in ckpt_obj["adapter"]
+            
+            logger.info(f">>> LOADING ADAPTER: {target_lang}")
+            ft_obj = ckpt_obj["adapter"][target_lang]
+            ft_model = ft_obj["model"]
+            cdevice = models[0].w2v_encoder.proj.weight.device
+            cdtype = models[0].w2v_encoder.proj.weight.dtype
+            ft_proj_out, ft_proj_in = ft_model["w2v_encoder.proj.weight"].shape
+            ft_proj = torch.nn.Linear(ft_proj_in, ft_proj_out, bias=True)
+            ft_proj.to(device=cdevice, dtype=cdtype)
+            models[0].w2v_encoder.proj = ft_proj
+            with torch.no_grad():
+                for kk, vv in models[0].named_parameters():
+                    if kk in ft_model:
+                        vv.copy_(ft_model[kk])
+            self.task.load_state_dict(ft_obj["task_state"])
+            # overwrite gen_subset with master config
+            self.cfg.dataset.gen_subset = re.sub('^[\w-]+:', saved_cfg['task']['multi_corpus_keys']+":", self.cfg.dataset.gen_subset)
         self.models = models
         self.saved_cfg = saved_cfg
         self.tgt_dict = self.task.target_dictionary
@@ -120,6 +144,7 @@ class InferenceProcessor:
         self.hypo_units_file = None
         self.ref_words_file = None
         self.ref_units_file = None
+        self.score_file = None
 
         self.progress_bar = self.build_progress_bar()
 
@@ -129,6 +154,7 @@ class InferenceProcessor:
             self.hypo_units_file = self.get_res_file("hypo.units")
             self.ref_words_file = self.get_res_file("ref.word")
             self.ref_units_file = self.get_res_file("ref.units")
+            self.score_file = self.get_res_file("asr_score")
         return self
 
     def __exit__(self, *exc) -> bool:
@@ -137,6 +163,7 @@ class InferenceProcessor:
             self.hypo_units_file.close()
             self.ref_words_file.close()
             self.ref_units_file.close()
+            self.score_file.close()
         return False
 
     def __iter__(self) -> Any:
@@ -266,7 +293,6 @@ class InferenceProcessor:
         batch_id: int,
     ) -> Tuple[int, int]:
         speaker = None  # Speaker can't be parsed from dataset.
-
         if "target_label" in sample:
             toks = sample["target_label"]
         else:
@@ -290,6 +316,7 @@ class InferenceProcessor:
             print(f"{hyp_words} ({speaker}-{sid})", file=self.hypo_words_file)
             print(f"{tgt_pieces} ({speaker}-{sid})", file=self.ref_units_file)
             print(f"{tgt_words} ({speaker}-{sid})", file=self.ref_words_file)
+            print(f"{hypo['score'].item()} ({speaker}-{sid})", file=self.score_file)
 
         if not self.cfg.common_eval.quiet:
             logger.info(f"HYPO: {hyp_words}")
